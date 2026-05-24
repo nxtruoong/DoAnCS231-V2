@@ -108,6 +108,9 @@ def attention_grid_twostream(model, loader, mean, std, device, out_path: Path,
     import matplotlib.pyplot as plt
     from eval import _denorm_to_uint8, overlay_sam
 
+    if not getattr(model.full_stream, "use_cbam", True):
+        print("Model has no CBAM — skipping attention grid.")
+        return
     picked: dict[int, list[tuple[np.ndarray, np.ndarray, int]]] = {i: [] for i in range(10)}
     model.to(device)
     for batch in loader:
@@ -158,8 +161,10 @@ def failure_cases_twostream(model, loader, mean, std, device, out_path: Path,
     import matplotlib.pyplot as plt
     from eval import _denorm_to_uint8, overlay_sam
 
+    if not getattr(model.full_stream, "use_cbam", True):
+        print("Model has no CBAM — failure overlays will skip heatmap.")
     model.to(device)
-    failures: list[tuple[np.ndarray, np.ndarray, int, int, float]] = []
+    failures: list[tuple[np.ndarray, np.ndarray | None, int, int, float]] = []
     for batch in loader:
         if mode == "pose":
             full, pose, labels = batch
@@ -174,13 +179,14 @@ def failure_cases_twostream(model, loader, mean, std, device, out_path: Path,
         probs = F.softmax(logits, dim=1)
         preds = probs.argmax(dim=1)
         sam = model.last_spatial_attention()
-        sam_up = F.interpolate(sam, size=full.shape[-2:], mode="bilinear", align_corners=False)
+        sam_up = (F.interpolate(sam, size=full.shape[-2:], mode="bilinear", align_corners=False)
+                  if sam is not None else None)
         wrong = (preds.cpu() != labels).nonzero(as_tuple=True)[0]
         for idx in wrong:
             t = int(labels[idx]); p = int(preds[idx])
             conf = float(probs[idx, p])
             rgb = _denorm_to_uint8(full[idx], mean, std)
-            heat = sam_up[idx, 0].cpu().numpy()
+            heat = sam_up[idx, 0].cpu().numpy() if sam_up is not None else None
             failures.append((rgb, heat, t, p, conf))
         if len(failures) >= n * 4:
             break
@@ -196,7 +202,7 @@ def failure_cases_twostream(model, loader, mean, std, device, out_path: Path,
     axes = np.atleast_2d(axes)
     for i, (rgb, heat, t, p, conf) in enumerate(failures):
         r, c = divmod(i, cols); ax = axes[r, c]
-        ax.imshow(overlay_sam(rgb, heat))
+        ax.imshow(overlay_sam(rgb, heat) if heat is not None else rgb)
         ax.set_title(f"true {CLASSES[t]} | pred {CLASSES[p]} ({conf:.2f})", fontsize=8, color="red")
         ax.axis("off")
     for i in range(len(failures), rows * cols):
