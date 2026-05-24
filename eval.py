@@ -36,6 +36,7 @@ from torch.utils.data import DataLoader
 
 from augment import CLASSES, StateFarmDataset, build_eval_transform, load_stats
 from model import build_model
+from model_resnet50 import build_resnet50_cbam
 
 
 CLASS_NAMES = {
@@ -54,10 +55,15 @@ CLASS_NAMES = {
 
 def load_model(ckpt_path: Path, use_ema: bool = True, use_cbam: bool = True) -> torch.nn.Module:
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    # Auto-detect CBAM presence from checkpoint args, fall back to flag
     saved_args = ckpt.get("args", {})
     use_cbam = not saved_args.get("no_cbam", not use_cbam)
-    model = build_model(num_classes=10, use_cbam=use_cbam)
+    backbone = saved_args.get("backbone", "resnet18")
+    pretrained = bool(saved_args.get("pretrained", False))
+    if backbone == "resnet50":
+        model = build_resnet50_cbam(num_classes=10, use_cbam=use_cbam,
+                                    pretrained=pretrained)
+    else:
+        model = build_model(num_classes=10, use_cbam=use_cbam)
     state = ckpt["ema" if use_ema else "model"]
     model.load_state_dict(state, strict=True)
     model.eval()
@@ -272,12 +278,21 @@ def main() -> None:
     ap.add_argument("--no-ema", dest="use_ema", action="store_false")
     ap.add_argument("--img-size", type=int, default=224,
                     help="Eval input resolution. Should match the value used at training.")
+    ap.add_argument("--imagenet-stats", action="store_true",
+                    help="Force ImageNet mean/std normalization (auto-enabled "
+                         "if the ckpt was trained with --imagenet-stats).")
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    mean, std = load_stats(args.splits_dir / "stats.json")
+    ckpt_args = torch.load(args.ckpt, map_location="cpu", weights_only=False).get("args", {})
+    use_imagenet_stats = bool(ckpt_args.get("imagenet_stats", False)) or args.imagenet_stats
+    if use_imagenet_stats:
+        mean = [0.485, 0.456, 0.406]
+        std  = [0.229, 0.224, 0.225]
+    else:
+        mean, std = load_stats(args.splits_dir / "stats.json")
     eval_tx = build_eval_transform(mean, std, size=args.img_size)
     val_df = pd.read_csv(args.splits_dir / "val.csv")
     val_ds = StateFarmDataset(

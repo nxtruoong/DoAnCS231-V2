@@ -40,6 +40,7 @@ from augment import (
     cutmix_batch, load_stats, mixup_loss,
 )
 from model import build_model
+from model_resnet50 import build_resnet50_cbam
 
 
 def seed_everything(seed: int = 42) -> None:
@@ -174,7 +175,15 @@ def main() -> None:
     ap.add_argument("--no-grayscale", action="store_true",
                     help="Tier-1 fallback: drop RandomGrayscale from train aug.")
     ap.add_argument("--no-cbam", action="store_true",
-                    help="Ablation baseline: ResNet-18 without CBAM blocks.")
+                    help="Ablation baseline: backbone without CBAM blocks.")
+    ap.add_argument("--backbone", choices=["resnet18", "resnet50"], default="resnet18",
+                    help="resnet18 = Run 6 from-scratch backbone. "
+                         "resnet50 = Run 10 ImageNet-pretrained backbone.")
+    ap.add_argument("--pretrained", action="store_true",
+                    help="Use ImageNet pretrained weights (resnet50 only).")
+    ap.add_argument("--imagenet-stats", action="store_true",
+                    help="Normalize with ImageNet mean/std instead of "
+                         "dataset stats. Recommended with --pretrained.")
     ap.add_argument("--minimal-aug", action="store_true",
                     help="Smoke test: strip ColorJitter/Grayscale/Blur/Erasing; "
                     "keep only RandomResizedCrop + Normalize.")
@@ -199,7 +208,11 @@ def main() -> None:
     seed_everything(args.seed)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    mean, std = load_stats(args.splits_dir / "stats.json")
+    if args.imagenet_stats:
+        mean = [0.485, 0.456, 0.406]
+        std  = [0.229, 0.224, 0.225]
+    else:
+        mean, std = load_stats(args.splits_dir / "stats.json")
     from torchvision import transforms
     if args.minimal_aug:
         train_tx = transforms.Compose([
@@ -226,7 +239,13 @@ def main() -> None:
                             num_workers=args.num_workers, pin_memory=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model(num_classes=10, use_cbam=not args.no_cbam).to(device)
+    if args.backbone == "resnet50":
+        model = build_resnet50_cbam(num_classes=10, use_cbam=not args.no_cbam,
+                                    pretrained=args.pretrained).to(device)
+    else:
+        if args.pretrained:
+            raise SystemExit("--pretrained only supported with --backbone resnet50")
+        model = build_model(num_classes=10, use_cbam=not args.no_cbam).to(device)
     if args.data_parallel and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
@@ -257,7 +276,9 @@ def main() -> None:
     args_dict = {k: (str(v) if isinstance(v, Path) else v) for k, v in args_dict.items()}
 
     log_path = args.out_dir / "history.json"
-    print(f"Training {args.epochs} epochs | use_cbam={not args.no_cbam} | "
+    print(f"Training {args.epochs} epochs | backbone={args.backbone} | "
+          f"pretrained={args.pretrained} | imagenet_stats={args.imagenet_stats} | "
+          f"use_cbam={not args.no_cbam} | "
           f"use_cutmix={use_cutmix} | no_grayscale={args.no_grayscale} | "
           f"trivialaugment={args.trivialaugment} | img_size={args.img_size} | "
           f"ema_decay={args.ema_decay} | "
