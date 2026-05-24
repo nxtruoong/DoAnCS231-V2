@@ -19,6 +19,18 @@ import torch
 import torch.nn as nn
 
 from model import build_model
+from model_resnet50 import build_resnet50_cbam
+
+
+def _build_backbone(backbone: str, num_classes: int, use_cbam: bool,
+                    pretrained: bool) -> tuple[nn.Module, int]:
+    """Return (backbone_module, feature_dim) for the requested arch."""
+    if backbone == "resnet18":
+        return build_model(num_classes=num_classes, use_cbam=use_cbam), 512
+    if backbone == "resnet50":
+        return (build_resnet50_cbam(num_classes=num_classes, use_cbam=use_cbam,
+                                    pretrained=pretrained), 2048)
+    raise ValueError(f"unknown backbone: {backbone}")
 
 
 class TwoStreamCBAM(nn.Module):
@@ -73,16 +85,20 @@ class PoseFusionCBAM(nn.Module):
 
     def __init__(self, num_classes: int = 10, use_cbam: bool = True,
                  pose_dim: int = 36, pose_hidden: int = 128,
-                 fusion_hidden: int = 256, dropout: float = 0.3):
+                 fusion_hidden: int = 256, dropout: float = 0.3,
+                 backbone: str = "resnet18", pretrained: bool = False):
         super().__init__()
-        self.full_stream = build_model(num_classes=num_classes, use_cbam=use_cbam)
+        self.full_stream, feat_dim = _build_backbone(
+            backbone, num_classes=num_classes, use_cbam=use_cbam,
+            pretrained=pretrained,
+        )
         self.pose_proj = nn.Sequential(
             nn.Linear(pose_dim, pose_hidden),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
             nn.Linear(pose_hidden, pose_hidden),
         )
-        fused_dim = 512 + pose_hidden
+        fused_dim = feat_dim + pose_hidden
         self.classifier = nn.Sequential(
             nn.Linear(fused_dim, fusion_hidden),
             nn.ReLU(inplace=True),
@@ -102,6 +118,8 @@ class PoseFusionCBAM(nn.Module):
 
 
 def build_posefusion(num_classes: int = 10, use_cbam: bool = True,
-                     pose_dim: int = 36) -> PoseFusionCBAM:
+                     pose_dim: int = 36, backbone: str = "resnet18",
+                     pretrained: bool = False) -> PoseFusionCBAM:
     return PoseFusionCBAM(num_classes=num_classes, use_cbam=use_cbam,
-                          pose_dim=pose_dim)
+                          pose_dim=pose_dim, backbone=backbone,
+                          pretrained=pretrained)

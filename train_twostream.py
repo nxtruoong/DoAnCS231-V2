@@ -215,9 +215,19 @@ def main() -> None:
                     help="Path to checkpoint (.pt) to resume from")
     # Run 8 pose-fusion flags
     ap.add_argument("--pose-fusion", action="store_true",
-                    help="Use PoseFusionCBAM: single ResNet18+CBAM + 36-d MediaPipe pose")
+                    help="Use PoseFusionCBAM: single CNN+CBAM + 36-d MediaPipe pose")
     ap.add_argument("--pose-parquet", type=Path, default=None,
                     help="Path to splits/pose.parquet (required if --pose-fusion)")
+    # Run 9 backbone selector
+    ap.add_argument("--backbone", choices=["resnet18", "resnet50"], default="resnet18",
+                    help="CNN backbone for the full stream (default resnet18). "
+                         "resnet50 is the Run 9 ImageNet-pretrained path.")
+    ap.add_argument("--pretrained", action="store_true",
+                    help="Load ImageNet pretrained weights for the backbone "
+                         "(currently only honoured for --backbone resnet50).")
+    ap.add_argument("--imagenet-stats", action="store_true",
+                    help="Normalize with ImageNet mean/std instead of "
+                         "splits/stats.json. Recommended with --pretrained.")
     args = ap.parse_args()
 
     if args.pose_fusion and args.pose_parquet is None:
@@ -226,7 +236,11 @@ def main() -> None:
     seed_everything(args.seed)
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    mean, std = load_stats(args.splits_dir / "stats.json")
+    if args.imagenet_stats:
+        mean = [0.485, 0.456, 0.406]
+        std  = [0.229, 0.224, 0.225]
+    else:
+        mean, std = load_stats(args.splits_dir / "stats.json")
     tx_full_train = build_full_train_transform(mean, std, size=args.full_size)
     tx_full_eval  = build_full_eval_transform(mean, std, size=args.full_size)
 
@@ -262,8 +276,11 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if args.pose_fusion:
         model = build_posefusion(num_classes=10, use_cbam=not args.no_cbam,
-                                 pose_dim=POSE_DIM).to(device)
+                                 pose_dim=POSE_DIM, backbone=args.backbone,
+                                 pretrained=args.pretrained).to(device)
     else:
+        if args.backbone != "resnet18":
+            raise SystemExit("--backbone resnet50 currently only supported with --pose-fusion")
         model = build_twostream(num_classes=10, use_cbam=not args.no_cbam).to(device)
     if args.data_parallel and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
@@ -311,7 +328,8 @@ def main() -> None:
         print(f"Resumed from {args.resume} at epoch {start_epoch} "
               f"(best_val_acc={best_val_acc:.4f})")
     if args.pose_fusion:
-        print(f"Pose-fusion training {args.epochs} epochs | full={args.full_size} "
+        print(f"Pose-fusion training {args.epochs} epochs | backbone={args.backbone}"
+              f"{' (ImageNet)' if args.pretrained else ''} | full={args.full_size} "
               f"pose_dim={POSE_DIM} | batch={args.batch_size} | cutmix=disabled | "
               f"device={device} | gpus={torch.cuda.device_count()}")
     else:

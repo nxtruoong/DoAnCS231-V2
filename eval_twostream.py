@@ -50,25 +50,28 @@ def detect_mode(ckpt_path: Path) -> str:
     return "two"
 
 
-def load_model_for_ckpt(ckpt_path: Path, use_ema: bool = True) -> tuple[torch.nn.Module, str]:
+def load_model_for_ckpt(ckpt_path: Path, use_ema: bool = True) -> tuple[torch.nn.Module, str, dict]:
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     saved_args = ckpt.get("args", {})
     use_cbam = not saved_args.get("no_cbam", False)
+    backbone = saved_args.get("backbone", "resnet18")
+    pretrained = bool(saved_args.get("pretrained", False))
     mode = "pose" if (ckpt.get("pose_fusion", False)
                       or bool(saved_args.get("pose_fusion", False))) else "two"
     if mode == "pose":
-        model = build_posefusion(num_classes=10, use_cbam=use_cbam, pose_dim=POSE_DIM)
+        model = build_posefusion(num_classes=10, use_cbam=use_cbam, pose_dim=POSE_DIM,
+                                 backbone=backbone, pretrained=pretrained)
     else:
         model = build_twostream(num_classes=10, use_cbam=use_cbam)
     state = ckpt["ema" if use_ema else "model"]
     model.load_state_dict(state, strict=True)
     model.eval()
-    return model, mode
+    return model, mode, saved_args
 
 
 def load_twostream(ckpt_path: Path, use_ema: bool = True) -> torch.nn.Module:
     """Back-compat alias: returns a two-stream model only."""
-    model, mode = load_model_for_ckpt(ckpt_path, use_ema=use_ema)
+    model, mode, _ = load_model_for_ckpt(ckpt_path, use_ema=use_ema)
     if mode != "two":
         raise RuntimeError(f"Expected two-stream ckpt, got mode={mode}")
     return model
@@ -220,15 +223,26 @@ def main() -> None:
     # Run 8 pose-fusion eval flags
     ap.add_argument("--pose-parquet", type=Path, default=None,
                     help="Required when evaluating a pose-fusion (Run 8) checkpoint")
+    ap.add_argument("--imagenet-stats", action="store_true",
+                    help="Force ImageNet mean/std normalization (auto-enabled "
+                         "if the ckpt was trained with --imagenet-stats).")
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model, mode = load_model_for_ckpt(args.ckpt, use_ema=args.use_ema)
-    print(f"Loaded {mode}-stream model from {args.ckpt} (use_ema={args.use_ema})")
+    model, mode, saved_args = load_model_for_ckpt(args.ckpt, use_ema=args.use_ema)
+    print(f"Loaded {mode}-stream model from {args.ckpt} "
+          f"(backbone={saved_args.get('backbone', 'resnet18')}, "
+          f"pretrained={bool(saved_args.get('pretrained', False))}, "
+          f"use_ema={args.use_ema})")
 
-    mean, std = load_stats(args.splits_dir / "stats.json")
+    use_imagenet_stats = bool(saved_args.get("imagenet_stats", False)) or args.imagenet_stats
+    if use_imagenet_stats:
+        mean = [0.485, 0.456, 0.406]
+        std  = [0.229, 0.224, 0.225]
+    else:
+        mean, std = load_stats(args.splits_dir / "stats.json")
     tx_full = build_full_eval_transform(mean, std, size=args.full_size)
     val_df = pd.read_csv(args.splits_dir / "val.csv")
 
